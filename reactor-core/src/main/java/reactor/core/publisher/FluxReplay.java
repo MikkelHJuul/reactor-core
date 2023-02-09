@@ -19,10 +19,7 @@ package reactor.core.publisher;
 import java.util.Objects;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
-import java.util.concurrent.atomic.AtomicLongFieldUpdater;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
+import java.util.concurrent.atomic.*;
 import java.util.function.Consumer;
 import java.util.stream.Stream;
 
@@ -770,6 +767,452 @@ final class FluxReplay<T> extends ConnectableFlux<T>
 		}
 
 	}
+
+	static final class SingletonReplayBuffer<T> implements FluxReplay.ReplayBuffer<T> {
+		final AtomicReference<T> val = new AtomicReference<>(null);
+
+		volatile boolean done;
+		Throwable error;
+		@Override
+		public void add(T value) {
+			val.set(value);
+		}
+
+		@Override
+		public void onError(Throwable ex) {
+			error = ex;
+			done = true;
+		}
+
+		@Override
+		public Throwable getError() {
+			return error;
+		}
+
+		@Override
+		public void onComplete() {
+			done = true;
+		}
+
+		@Override
+		public void replay(FluxReplay.ReplaySubscription<T> rs) {
+			if (!rs.enter()) {
+				return;
+			}
+
+			if (rs.fusionMode() == FluxReplay.NONE) {
+				replayNormal(rs);
+			}
+			else {
+				replayFused(rs);
+			}
+		}
+
+		private void replayNormal(FluxReplay.ReplaySubscription<T> rs) {
+			final Subscriber<? super T> a = rs.actual();
+
+			int missed = 1;
+			long r = rs.requested();
+			long e = 0L;
+
+			for (; ; ) {
+
+				@SuppressWarnings("unchecked") T curr = (T) rs.node();
+				T t = val.get();
+				if (curr == t) {
+					return;
+				}
+				if (curr == null) {
+					curr = t;
+					rs.node(curr);
+				}
+				boolean d = done;
+				boolean empty = t == null;
+
+				if (d && empty) {
+					rs.node(null);
+					Throwable ex = error;
+					if (ex != null) {
+						a.onError(ex);
+					}
+					else {
+						a.onComplete();
+					}
+					return;
+				}
+
+				if (empty) {
+					continue;
+				}
+
+				if (rs.isCancelled()) {
+					rs.node(null);
+					return;
+				}
+
+
+				a.onNext(t);
+				e++;
+
+				if (r != Long.MAX_VALUE) {
+					rs.produced(1);
+				}
+
+				rs.node(t);
+
+				missed = rs.leave(missed);
+				if (missed == 0 || e == r) {
+					break;
+				}
+			}
+		}
+
+		private void replayFused(FluxReplay.ReplaySubscription<T> rs) {
+			int missed = 1;
+
+			final Subscriber<? super T> a = rs.actual();
+
+			for (; ; ) {
+
+				if (rs.isCancelled()) {
+					rs.node(null);
+					return;
+				}
+
+				boolean d = done;
+
+				a.onNext(null);
+
+				if (d) {
+					Throwable ex = error;
+					if (ex != null) {
+						a.onError(ex);
+					}
+					else {
+						a.onComplete();
+					}
+					return;
+				}
+
+				missed = rs.leave(missed);
+				if (missed == 0) {
+					break;
+				}
+			}
+		}
+
+		@Override
+		public boolean isDone() {
+			return done;
+		}
+
+		@Override
+		public T poll(FluxReplay.ReplaySubscription<T> rs) {
+			@SuppressWarnings("unchecked") T node = (T) rs.node();
+			T next = val.get();
+			if (node == null) {
+				rs.node(next);
+			}
+			return next;
+		}
+
+		@Override
+		public void clear(FluxReplay.ReplaySubscription<T> rs) {
+			rs.node(null);
+		}
+
+		@Override
+		public boolean isEmpty(FluxReplay.ReplaySubscription<T> rs) {
+			@SuppressWarnings("unchecked") T node = (T) rs.node();
+			if (node == null) {
+				rs.node(val.get());
+				return false;
+				// doesn't this mean that the subscription is not up-to-date?
+				// then the subscription can progress, why add the node, then?
+			}
+			return node == val.get();
+		}
+
+		@Override
+		public int size(FluxReplay.ReplaySubscription<T> rs) {
+			@SuppressWarnings("unchecked") T node = (T) rs.node();
+			T t = val.get();
+			if (node == null) {
+				rs.node(t);
+			}
+			return sizeOf(t);
+		}
+
+		@Override
+		public int size() {
+			return  sizeOf(val.get());
+		}
+
+		private int sizeOf(@Nullable T t) {
+			return t != null ? 1 : 0;
+		}
+
+		@Override
+		public int capacity() {
+			return 1;
+		}
+
+		@Override
+		public boolean isExpired() {
+			return false;
+		}
+	}
+
+	static final class AtomicArraySizeBoundReplayBuffer<T> implements FluxReplay.ReplayBuffer<T> {
+
+		final AtomicInteger head = new AtomicInteger();
+		final int indexUpdateLimit;
+		volatile boolean done;
+		Throwable error;
+
+		final AtomicReferenceArray<T> buffer;
+
+		AtomicArraySizeBoundReplayBuffer(int limit) {
+			if (limit < 0) {
+				throw new IllegalArgumentException("Limit cannot be negative");
+			}
+			this.indexUpdateLimit = Operators.unboundedOrLimit(limit);
+
+			this.buffer = new AtomicReferenceArray<>(limit);
+		}
+
+		@Override
+		public boolean isExpired() {
+			return false;
+		}
+
+		@Override
+		public int capacity() {
+			return buffer.length();
+		}
+
+		@Override
+		public void add(T value) {
+			buffer.set(
+					head.incrementAndGet()%capacity(),
+					value
+			);
+		}
+
+		@Override
+		public void onError(Throwable ex) {
+			error = ex;
+			done = true;
+		}
+
+		@Override
+		public void onComplete() {
+			done = true;
+		}
+
+		void replayNormal(FluxReplay.ReplaySubscription<T> rs) {
+			final Subscriber<? super T> a = rs.actual();
+
+			int missed = 1;
+
+			for (; ; ) {
+
+				long r = rs.requested();
+				long e = 0L;
+
+				Integer curr = (Integer) rs.node();
+				Integer hd = head.get();
+				if (hd.equals(curr)) {
+					return;
+				}
+				if (curr == null) {
+					curr = head.get();
+					rs.node(curr);
+				}
+				int last = curr;
+				curr = nextOrReset(curr);
+
+				while (e != r) {
+					if (rs.isCancelled()) {
+						rs.node(null);
+						return;
+					}
+
+					boolean d = done;
+					T next = buffer.get(curr%capacity());
+					boolean empty = next == null;
+
+					if (d && empty) { // if start is not 0 here that is a clear bug!
+						rs.node(null);
+						Throwable ex = error;
+						if (ex != null) {
+							a.onError(ex);
+						}
+						else {
+							a.onComplete();
+						}
+						return;
+					}
+
+					if (empty) {
+						break;
+					}
+
+					a.onNext(next);
+
+					e++;
+					if (curr == last) break;
+					curr = nextOrReset(curr);
+
+
+					if ((curr + 1) % indexUpdateLimit == 0) {
+						rs.requestMore(curr + 1);
+					}
+				}
+
+				if (e != 0L) {
+					if (r != Long.MAX_VALUE) {
+						rs.produced(e);
+					}
+				}
+
+				rs.node(curr);
+
+				missed = rs.leave(missed);
+				if (missed == 0) {
+					break;
+				}
+			}
+		}
+
+		private Integer nextOrReset(Integer curr) {
+			if (curr + 1 == capacity()) {
+				return 0;
+			}
+			return curr + 1;
+		}
+
+
+		void replayFused(FluxReplay.ReplaySubscription<T> rs) {
+			int missed = 1;
+
+			final Subscriber<? super T> a = rs.actual();
+
+			for (; ; ) {
+
+				if (rs.isCancelled()) {
+					rs.node(null);
+					return;
+				}
+
+				boolean d = done;
+
+				a.onNext(null);
+
+				if (d) {
+					Throwable ex = error;
+					if (ex != null) {
+						a.onError(ex);
+					}
+					else {
+						a.onComplete();
+					}
+					return;
+				}
+
+				missed = rs.leave(missed);
+				if (missed == 0) {
+					break;
+				}
+			}
+		}
+
+		@Override
+		public void replay(FluxReplay.ReplaySubscription<T> rs) {
+			if (!rs.enter()) {
+				return;
+			}
+
+			if (rs.fusionMode() == FluxReplay.NONE) {
+				replayNormal(rs);
+			}
+			else {
+				replayFused(rs);
+			}
+		}
+
+		@Override
+		@Nullable
+		public Throwable getError() {
+			return error;
+		}
+
+		@Override
+		public boolean isDone() {
+			return done;
+		}
+
+		@Override
+		@Nullable
+		public T poll(FluxReplay.ReplaySubscription<T> rs) {
+			Integer node = (Integer) rs.node();
+			if (node == null) {
+				node = head.get();
+				rs.node(node);
+			}
+
+			T next = buffer.get(node%capacity());
+			if (next == null) {
+				return null;
+			}
+			rs.node(node+1);
+
+			if ((node + 1) % indexUpdateLimit == 0) {
+				rs.requestMore(node + 1);
+			}
+
+			return next;
+		}
+
+		@Override
+		public void clear(FluxReplay.ReplaySubscription<T> rs) {
+			//clear array?
+			rs.node(null);
+		}
+
+		@Override
+		public boolean isEmpty(FluxReplay.ReplaySubscription<T> rs) {
+			Integer node = (Integer) rs.node();
+			if (node == null) {
+				node = head.get();
+				rs.node(node);
+			}
+			return buffer.get(0) == null;
+		}
+
+		@Override
+		public int size(FluxReplay.ReplaySubscription<T> rs) {
+			Integer node = (Integer) rs.node();
+			if (node == null) {
+				node = head.get();
+			}
+			return sizeFrom(node);
+		}
+
+		@Override
+		public int size() {
+			return sizeFrom(head.get());
+		}
+
+		private int sizeFrom(int position) {
+			if (
+					position+1 >= capacity()
+							|| buffer.get(position+1%capacity()) != null
+			) return capacity();
+			return position;
+		}
+	}
+
 
 	static final class SizeBoundReplayBuffer<T> implements ReplayBuffer<T> {
 
