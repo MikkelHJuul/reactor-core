@@ -133,4 +133,102 @@ public class SinksManyReplayLatestStressTest {
             r.r2 = count.get();
         }
     }
+
+    @JCStressTest
+    @Outcome(id = {"6"}, expect = ACCEPTABLE, desc = "all signals go through")
+    @State
+    public static class FluxReplayLatestWriteStressTest extends SinksManyReplayLatestStressTest {
+        public FluxReplayLatestWriteStressTest() {
+            // subscribe before start
+            sink.subscribe(target);
+        }
+
+
+        @Actor
+        public void one() {
+            sink.tryEmitNext("Hello");
+        }
+
+        @Actor
+        public void two() {
+            sink.tryEmitNext("Hello");
+        }
+
+        @Actor
+        public void three() {
+            sink.tryEmitNext("Hello");
+        }
+
+        @Actor
+        public void four() {
+            sink.tryEmitNext("Hello");
+        }
+
+        @Actor
+        public void five() {
+            sink.tryEmitNext("Hello");
+        }
+
+        @Actor
+        public void six() {
+            sink.tryEmitNext("Hello");
+        }
+
+        @Arbiter
+        public void arbiter(I_Result r) {
+            r.r1 = target.onNextCalls.get();
+        }
+    }
+
+    @JCStressTest
+    @Outcome(id = {"6"}, expect = ACCEPTABLE, desc = "all signals go through")
+    @State
+    public static class FluxReplaySizeBoundWriteStressTest {
+        final StressSubscriber<String> target = new StressSubscriber<>();
+
+        final SinkManyReplayProcessor<String> sink = new SinkManyReplayProcessor<>(
+                new FluxReplay.SizeBoundReplayBuffer<>(1)
+        );
+
+        public FluxReplaySizeBoundWriteStressTest() {
+            // subscribe before start
+            sink.subscribe(target);
+        }
+
+
+        @Actor
+        public void one() {
+            sink.tryEmitNext("Hello");
+        }
+
+        @Actor
+        public void two() {
+            sink.tryEmitNext("Hello");
+        }
+
+        @Actor
+        public void three() {
+            sink.tryEmitNext("Hello");
+        }
+
+        @Actor
+        public void four() {
+            sink.tryEmitNext("Hello");
+        }
+
+        @Actor
+        public void five() {
+            sink.tryEmitNext("Hello");
+        }
+
+        @Actor
+        public void six() {
+            sink.tryEmitNext("Hello");
+        }
+
+        @Arbiter
+        public void arbiter(I_Result r) {
+            r.r1 = target.onNextCalls.get();
+        }
+    }
 }

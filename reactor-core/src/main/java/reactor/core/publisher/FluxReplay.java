@@ -504,8 +504,11 @@ final class FluxReplay<T> extends ConnectableFlux<T>
 
 		@Override
 		public void add(T value) {
-			int stamp = val.getStamp();
-			val.set(value, stamp + 1);
+			T ref;
+			int[] stamp = new int[1];
+			do {
+				ref = val.get(stamp);
+			} while (!val.compareAndSet(ref, value, stamp[0], stamp[0]+1));
 		}
 
 		@Override
