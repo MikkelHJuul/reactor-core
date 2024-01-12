@@ -23,10 +23,8 @@ import org.reactivestreams.Subscription;
 
 import reactor.core.CoreSubscriber;
 import reactor.core.Scannable;
-import reactor.core.publisher.FluxSampleTimeout.SampleTimeoutOther;
 import reactor.test.StepVerifier;
 import reactor.test.subscriber.AssertSubscriber;
-import reactor.util.concurrent.Queues;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static reactor.core.publisher.Sinks.EmitFailureHandler.FAIL_FAST;
@@ -182,7 +180,7 @@ public class FluxSampleTimeoutTest {
 	Flux<Integer> scenario_sampleTimeoutTime(){
 		return Flux.range(1, 10)
 		           .delayElements(Duration.ofMillis(300))
-		           .sampleTimeout(d -> Mono.delay(Duration.ofMillis(100*d)), 1);
+		           .sampleTimeout(d -> Mono.delay(Duration.ofMillis(100*d)));
 	}
 
 	@Test
@@ -195,7 +193,7 @@ public class FluxSampleTimeoutTest {
 	Flux<Integer> scenario_sampleTimeoutTime2(){
 		return Flux.range(1, 10)
 		           .delayElements(Duration.ofMillis(300))
-		           .sampleTimeout(d -> Mono.delay(Duration.ofMillis(100*d)), Integer.MAX_VALUE);
+		           .sampleTimeout(d -> Mono.delay(Duration.ofMillis(100*d)));
 	}
 
 	@Test
@@ -209,7 +207,7 @@ public class FluxSampleTimeoutTest {
 	@Test
 	public void scanOperator(){
 		Flux<Integer> parent = Flux.just(1);
-		FluxSampleTimeout<Integer, Integer> test = new FluxSampleTimeout<>(parent, v -> Flux.just(2), Queues.empty());
+		FluxSampleTimeout<Integer, Integer> test = new FluxSampleTimeout<>(parent, v -> Flux.just(2));
 
 		assertThat(test.scan(Scannable.Attr.PARENT)).isSameAs(parent);
 		assertThat(test.scan(Scannable.Attr.RUN_STYLE)).isSameAs(Scannable.Attr.RunStyle.SYNC);
@@ -219,8 +217,7 @@ public class FluxSampleTimeoutTest {
     public void scanMain() {
         CoreSubscriber<Integer> actual = new LambdaSubscriber<>(null, e -> {}, null, null);
         FluxSampleTimeout.SampleTimeoutMain<Integer, Integer> test =
-        		new FluxSampleTimeout.SampleTimeoutMain<>(actual, i -> Flux.just(i),
-        				Queues.<SampleTimeoutOther<Integer, Integer>>one().get());
+        		new FluxSampleTimeout.SampleTimeoutMain<>(actual, i -> Flux.just(i));
         Subscription parent = Operators.emptySubscription();
         test.onSubscribe(parent);
 
@@ -228,8 +225,7 @@ public class FluxSampleTimeoutTest {
         assertThat(test.scan(Scannable.Attr.ACTUAL)).isSameAs(actual);
         test.requested = 35;
         assertThat(test.scan(Scannable.Attr.REQUESTED_FROM_DOWNSTREAM)).isEqualTo(35L);
-        test.queue.add(new FluxSampleTimeout.SampleTimeoutOther<Integer, Integer>(test, 1, 0));
-        assertThat(test.scan(Scannable.Attr.BUFFERED)).isEqualTo(1);
+        test.other = new FluxSampleTimeout.SampleTimeoutOther<>(test, 1);
         assertThat(test.scan(Scannable.Attr.RUN_STYLE)).isSameAs(Scannable.Attr.RunStyle.SYNC);
 
         assertThat(test.scan(Scannable.Attr.CANCELLED)).isFalse();
@@ -238,19 +234,18 @@ public class FluxSampleTimeoutTest {
         assertThat(test.scan(Scannable.Attr.ERROR)).hasMessage("boom");
         test.onComplete();
         assertThat(test.scan(Scannable.Attr.TERMINATED)).isTrue();
-        assertThat(test.scan(Scannable.Attr.CANCELLED)).isTrue();
+        assertThat(test.scan(Scannable.Attr.CANCELLED)).isFalse();
     }
 
 	@Test
     public void scanOther() {
 		CoreSubscriber<Integer> actual = new LambdaSubscriber<>(null, e -> {}, null, null);
         FluxSampleTimeout.SampleTimeoutMain<Integer, Integer> main =
-        		new FluxSampleTimeout.SampleTimeoutMain<>(actual, i -> Flux.just(i),
-        				Queues.<SampleTimeoutOther<Integer, Integer>>one().get());
+        		new FluxSampleTimeout.SampleTimeoutMain<>(actual, i -> Flux.just(i));
         FluxSampleTimeout.SampleTimeoutOther<Integer, Integer> test =
-        		new FluxSampleTimeout.SampleTimeoutOther<Integer, Integer>(main, 1, 0);
+        		new FluxSampleTimeout.SampleTimeoutOther<>(main, 1);
 
-        assertThat(test.scan(Scannable.Attr.PARENT)).isSameAs(main.other);
+        assertThat(test.scan(Scannable.Attr.PARENT)).isNull();
         assertThat(test.scan(Scannable.Attr.ACTUAL)).isSameAs(main);
         test.request(35);
 		assertThat(test.scan(Scannable.Attr.REQUESTED_FROM_DOWNSTREAM)).isEqualTo(35);

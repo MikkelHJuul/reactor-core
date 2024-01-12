@@ -8092,33 +8092,7 @@ public abstract class Flux<T> implements CorePublisher<T> {
 	 * during the window defined by a companion {@link Publisher} derived from that particular
 	 * value.
 	 * <p>
-	 * Note that this means that the last value in the sequence is always emitted.
-	 *
-	 * <p>
-	 * <img class="marble" src="doc-files/marbles/sampleTimeoutWithThrottlerFactory.svg" alt="">
-	 *
-	 * <p><strong>Discard Support:</strong> This operator discards elements that are not part of the sampling.
-	 *
-	 * @param throttlerFactory supply a companion sampler {@link Publisher} which signals
-	 * the end of the window during which no new emission should occur. If it is the case,
-	 * the original value triggering the window is emitted.
-	 * @param <U> the companion reified type
-	 *
-	 * @return a {@link Flux} sampled to items not followed by any other item within a window
-	 * defined by a companion {@link Publisher}
-	 */
-	public final <U> Flux<T> sampleTimeout(Function<? super T, ? extends Publisher<U>> throttlerFactory) {
-		return sampleTimeout(throttlerFactory, Queues.XS_BUFFER_SIZE);
-	}
-
-	/**
-	 * Emit the latest value from this {@link Flux} only if there were no new values emitted
-	 * during the window defined by a companion {@link Publisher} derived from that particular
-	 * value.
-	 * <p>The provided {@literal maxConcurrency} will keep a bounded maximum of concurrent timeouts and drop any new
-	 * items until at least one timeout terminates.
-	 * <p>
-	 * Note that this means that the last value in the sequence is always emitted.
+	 * The last value in the sequence is always emitted.
 	 *
 	 * <p>
 	 * <img class="marble" src="doc-files/marbles/sampleTimeoutWithThrottlerFactoryAndMaxConcurrency.svg" alt="">
@@ -8128,17 +8102,14 @@ public abstract class Flux<T> implements CorePublisher<T> {
 	 * @param throttlerFactory supply a companion sampler {@link Publisher} which signals
 	 * the end of the window during which no new emission should occur. If it is the case,
 	 * the original value triggering the window is emitted.
-	 * @param maxConcurrency the maximum number of concurrent timeouts
 	 * @param <U> the throttling type
 	 *
 	 * @return a {@link Flux} sampled to items not followed by any other item within a window
 	 * defined by a companion {@link Publisher}
 	 */
-	//FIXME re-evaluate the wording on maxConcurrency, seems more related to request/buffering. If so redo the marble
 	public final <U> Flux<T> sampleTimeout(Function<? super T, ? extends Publisher<U>>
-			throttlerFactory, int maxConcurrency) {
-		return onAssembly(new FluxSampleTimeout<>(this, throttlerFactory,
-				Queues.get(maxConcurrency)));
+			throttlerFactory) {
+		return onAssembly(new FluxSampleTimeout<>(this, throttlerFactory));
 	}
 
 	/**

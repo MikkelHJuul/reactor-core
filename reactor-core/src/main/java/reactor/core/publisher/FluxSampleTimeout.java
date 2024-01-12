@@ -16,15 +16,6 @@
 
 package reactor.core.publisher;
 
-import java.util.Objects;
-import java.util.Queue;
-import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
-import java.util.concurrent.atomic.AtomicLongFieldUpdater;
-import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
-import java.util.function.Function;
-import java.util.function.Supplier;
-import java.util.stream.Stream;
-
 import org.reactivestreams.Publisher;
 import org.reactivestreams.Subscriber;
 import org.reactivestreams.Subscription;
@@ -33,6 +24,13 @@ import reactor.core.Exceptions;
 import reactor.core.Scannable;
 import reactor.util.annotation.Nullable;
 import reactor.util.context.Context;
+
+import java.util.Objects;
+import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
+import java.util.concurrent.atomic.AtomicLongFieldUpdater;
+import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
+import java.util.function.Function;
+import java.util.stream.Stream;
 
 /**
  * Emits the last value from upstream only if there were no newer values emitted
@@ -47,15 +45,13 @@ final class FluxSampleTimeout<T, U> extends InternalFluxOperator<T, T> {
 
 	final Function<? super T, ? extends Publisher<U>> throttler;
 
-	final Supplier<Queue<Object>> queueSupplier;
 
 	FluxSampleTimeout(Flux<? extends T> source,
-			Function<? super T, ? extends Publisher<U>> throttler,
-			Supplier<Queue<Object>> queueSupplier) {
+					  Function<? super T, ? extends Publisher<U>> throttler) {
 		super(source);
 		this.throttler = Objects.requireNonNull(throttler, "throttler");
-		this.queueSupplier = Objects.requireNonNull(queueSupplier, "queueSupplier");
 	}
+
 
 	@Override
 	public int getPrefetch() {
@@ -63,11 +59,9 @@ final class FluxSampleTimeout<T, U> extends InternalFluxOperator<T, T> {
 	}
 
 	@Override
-	@SuppressWarnings({"rawtypes", "unchecked"})
 	public CoreSubscriber<? super T> subscribeOrReturn(CoreSubscriber<? super T> actual) {
-		Queue<SampleTimeoutOther<T, U>> q = (Queue) queueSupplier.get();
 
-		SampleTimeoutMain<T, U> main = new SampleTimeoutMain<>(actual, throttler, q);
+		SampleTimeoutMain<T, U> main = new SampleTimeoutMain<>(actual, throttler);
 
 		actual.onSubscribe(main);
 
@@ -83,7 +77,6 @@ final class FluxSampleTimeout<T, U> extends InternalFluxOperator<T, T> {
 	static final class SampleTimeoutMain<T, U>implements InnerOperator<T, T> {
 
 		final Function<? super T, ? extends Publisher<U>> throttler;
-		final Queue<SampleTimeoutOther<T, U>>             queue;
 		final CoreSubscriber<? super T>                   actual;
 		final Context                                     ctx;
 
@@ -95,22 +88,19 @@ final class FluxSampleTimeout<T, U> extends InternalFluxOperator<T, T> {
 						Subscription.class,
 						"s");
 
-		volatile Subscription other;
+
+		private static final SampleTimeoutOther<?, ?> TERMINATED = SampleTimeoutOther.sentinel();
+		volatile SampleTimeoutOther<?, ?> other = SampleTimeoutOther.sentinel();
 		@SuppressWarnings("rawtypes")
-		static final AtomicReferenceFieldUpdater<SampleTimeoutMain, Subscription>
+		static final AtomicReferenceFieldUpdater<SampleTimeoutMain, SampleTimeoutOther>
 				OTHER = AtomicReferenceFieldUpdater.newUpdater(SampleTimeoutMain.class,
-				Subscription.class,
+				SampleTimeoutOther.class,
 				"other");
 
 		volatile long requested;
 		@SuppressWarnings("rawtypes")
 		static final AtomicLongFieldUpdater<SampleTimeoutMain> REQUESTED =
 				AtomicLongFieldUpdater.newUpdater(SampleTimeoutMain.class, "requested");
-
-		volatile int wip;
-		@SuppressWarnings("rawtypes")
-		static final AtomicIntegerFieldUpdater<SampleTimeoutMain> WIP =
-				AtomicIntegerFieldUpdater.newUpdater(SampleTimeoutMain.class, "wip");
 
 		volatile Throwable error;
 		@SuppressWarnings("rawtypes")
@@ -123,18 +113,13 @@ final class FluxSampleTimeout<T, U> extends InternalFluxOperator<T, T> {
 
 		volatile boolean cancelled;
 
-		volatile long index;
-		@SuppressWarnings("rawtypes")
-		static final AtomicLongFieldUpdater<SampleTimeoutMain> INDEX =
-				AtomicLongFieldUpdater.newUpdater(SampleTimeoutMain.class, "index");
-
-		SampleTimeoutMain(CoreSubscriber<? super T> actual,
-				Function<? super T, ? extends Publisher<U>> throttler,
-				Queue<SampleTimeoutOther<T, U>> queue) {
+		SampleTimeoutMain(
+				CoreSubscriber<? super T> actual,
+				Function<? super T, ? extends Publisher<U>> throttler
+		) {
 			this.actual = actual;
 			this.ctx = actual.currentContext();
 			this.throttler = throttler;
-			this.queue = queue;
 		}
 
 		@Override
@@ -150,14 +135,13 @@ final class FluxSampleTimeout<T, U> extends InternalFluxOperator<T, T> {
 			if (key == Attr.PARENT) return s;
 			if (key == Attr.ERROR) return error;
 			if (key == Attr.REQUESTED_FROM_DOWNSTREAM) return requested;
-			if (key == Attr.BUFFERED) return queue.size();
 			if (key == Attr.RUN_STYLE) return Attr.RunStyle.SYNC;
 
 			return InnerOperator.super.scanUnsafe(key);
 		}
 
 		@Override
-		public final CoreSubscriber<? super T> actual() {
+		public CoreSubscriber<? super T> actual() {
 			return actual;
 		}
 
@@ -173,8 +157,10 @@ final class FluxSampleTimeout<T, U> extends InternalFluxOperator<T, T> {
 			if (!cancelled) {
 				cancelled = true;
 				Operators.terminate(S, this);
-				Operators.terminate(OTHER, this);
-				Operators.onDiscardQueueWithClear(queue, ctx, SampleTimeoutOther::toStream);
+				SampleTimeoutOther<?,?> last = OTHER.getAndSet(this, TERMINATED);
+				if (last != TERMINATED) {
+					last.cancel();
+				}
 			}
 		}
 
@@ -187,9 +173,10 @@ final class FluxSampleTimeout<T, U> extends InternalFluxOperator<T, T> {
 
 		@Override
 		public void onNext(T t) {
-			long idx = INDEX.incrementAndGet(this);
 
-			if (!Operators.set(OTHER, this, Operators.emptySubscription())) {
+			SampleTimeoutOther<?,?> last = OTHER.get(this);
+
+			if (last == TERMINATED) {
 				return;
 			}
 
@@ -198,24 +185,29 @@ final class FluxSampleTimeout<T, U> extends InternalFluxOperator<T, T> {
 			try {
 				p = Objects.requireNonNull(throttler.apply(t),
 						"throttler returned a null publisher");
-			}
-			catch (Throwable e) {
+			} catch (Throwable e) {
 				onError(Operators.onOperatorError(s, e, t, ctx));
 				return;
 			}
 
-			SampleTimeoutOther<T, U> os = new SampleTimeoutOther<>(this, t, idx);
+			SampleTimeoutOther<T, U> os = new SampleTimeoutOther<>(this, t);
 
-			if (Operators.replace(OTHER, this, os)) {
-				p = Operators.toFluxOrMono(p);
-				p.subscribe(os);
-			}
+			do {
+				if (OTHER.compareAndSet(this, last, os)) {
+					last.cancel();
+					p = Operators.toFluxOrMono(p);
+					p.subscribe(os);
+					return;
+				}
+			} while((last = OTHER.get(this)) != TERMINATED);
+
+			os.cancel(); // last == TERMINATED
 		}
 
-		void error(Throwable t) {
+		void error(Throwable t, SampleTimeoutOther<?,?> o) {
 			if (Exceptions.addThrowable(ERROR, this, t)) {
 				done = true;
-				drain();
+				terminate(actual, o);
 			}
 			else {
 				Operators.onErrorDropped(t, ctx);
@@ -224,117 +216,86 @@ final class FluxSampleTimeout<T, U> extends InternalFluxOperator<T, T> {
 
 		@Override
 		public void onError(Throwable t) {
-			Operators.terminate(OTHER, this);
-
-			error(t);
+			SampleTimeoutOther<?, ?> last = OTHER.getAndSet(this, TERMINATED);
+			error(t, last);
 		}
 
 		@Override
 		public void onComplete() {
-			Subscription o = other;
-			if (o instanceof FluxSampleTimeout.SampleTimeoutOther) {
-				SampleTimeoutOther<?, ?> os = (SampleTimeoutOther<?, ?>) o;
-				os.cancel();
-				os.onComplete();
-			}
+			SampleTimeoutOther<?, ?> o = other;
 			done = true;
-			drain();
+			if (o.once == 1) {
+				Subscriber<? super T> a = actual;
+				if (!terminate(a, o)){
+					a.onComplete();
+				}
+			}
 		}
 
 		void otherNext(SampleTimeoutOther<T, U> other) {
-			queue.offer(other);
-			drain();
-		}
 
-		void otherError(long idx, Throwable e) {
-			if (idx == index) {
-				Operators.terminate(S, this);
+			final Subscriber<? super T> a = actual;
 
-				error(e);
-			}
-			else {
-				Operators.onErrorDropped(e, ctx);
-			}
-		}
+			boolean d = done;
 
-		void drain() {
-			if (WIP.getAndIncrement(this) != 0) {
+			if (cancelOrTerminate(a, other, d)) {
 				return;
 			}
 
-			final Subscriber<? super T> a = actual;
-			final Queue<SampleTimeoutOther<T, U>> q = queue;
+			next(a, other);
 
-			int missed = 1;
-
-			for (; ; ) {
-
-				for (; ; ) {
-					boolean d = done;
-
-					SampleTimeoutOther<T, U> o = q.poll();
-
-					boolean empty = o == null;
-
-					if (checkTerminated(d, empty, a, q)) {
-						return;
-					}
-
-					if (empty) {
-						break;
-					}
-
-					if (o.index == index) {
-						long r = requested;
-						if (r != 0) {
-							a.onNext(o.value);
-							if (r != Long.MAX_VALUE) {
-								REQUESTED.decrementAndGet(this);
-							}
-						}
-						else {
-							cancel();
-
-							Operators.onDiscardQueueWithClear(q, ctx, SampleTimeoutOther::toStream);
-
-							Throwable e = Exceptions.failWithOverflow(
-									"Could not emit value due to lack of requests");
-							Exceptions.addThrowable(ERROR, this, e);
-							e = Exceptions.terminate(ERROR, this);
-
-							a.onError(e);
-							return;
-						}
-					}
-				}
-
-				missed = WIP.addAndGet(this, -missed);
-				if (missed == 0) {
-					break;
-				}
+			if (d) {
+				a.onComplete();
 			}
 		}
 
-		boolean checkTerminated(boolean d, boolean empty, Subscriber<?> a, Queue<SampleTimeoutOther<T, U>> q) {
+		void otherError(Throwable e, SampleTimeoutOther<T,U> o) {
+			Operators.terminate(S, this);
+			error(e, o);
+		}
+
+
+		private void next(Subscriber<? super T> a, SampleTimeoutOther<T, U> o) {
+			long r = requested;
+			if (r != 0) {
+				a.onNext(o.value);
+				if (r != Long.MAX_VALUE) {
+					REQUESTED.decrementAndGet(this);
+				}
+			}
+			else {
+				cancel();
+				o.cancel();
+
+				Throwable e = Exceptions.failWithOverflow(
+						"Could not emit value due to lack of requests");
+				Exceptions.addThrowable(ERROR, this, e);
+				e = Exceptions.terminate(ERROR, this);
+
+				a.onError(e);
+			}
+		}
+
+		private boolean cancelOrTerminate(Subscriber<?> a, SampleTimeoutOther<T, U> o, boolean done) {
 			if (cancelled) {
-				Operators.onDiscardQueueWithClear(q, ctx, SampleTimeoutOther::toStream);
+				o.cancel();
 				return true;
 			}
-			if (d) {
-				Throwable e = Exceptions.terminate(ERROR, this);
-				if (e != null && e != Exceptions.TERMINATED) {
-					cancel();
 
-					Operators.onDiscardQueueWithClear(q, ctx, SampleTimeoutOther::toStream);
+			if (done) {
+				return terminate(a, o);
+			}
+			return false;
+		}
 
-					a.onError(e);
-					return true;
-				}
-				else if (empty) {
+		boolean terminate(Subscriber<?> a, SampleTimeoutOther<?, ?> o) {
+			Throwable e = Exceptions.terminate(ERROR, this);
+			if (e != null && e != Exceptions.TERMINATED) {
+				cancel();
 
-					a.onComplete();
-					return true;
-				}
+				o.cancel();
+				a.onError(e);
+				return true;
 			}
 			return false;
 		}
@@ -347,17 +308,21 @@ final class FluxSampleTimeout<T, U> extends InternalFluxOperator<T, T> {
 
 		final T value;
 
-		final long index;
 
 		volatile int once;
 		@SuppressWarnings("rawtypes")
 		static final AtomicIntegerFieldUpdater<SampleTimeoutOther> ONCE =
 				AtomicIntegerFieldUpdater.newUpdater(SampleTimeoutOther.class, "once");
 
-		SampleTimeoutOther(SampleTimeoutMain<T, U> main, T value, long index) {
+		SampleTimeoutOther(SampleTimeoutMain<T, U> main, T value) {
 			this.main = main;
 			this.value = value;
-			this.index = index;
+		}
+
+		private static SampleTimeoutOther<Object, Object> sentinel() {
+			final SampleTimeoutOther<Object, Object> dummy = new SampleTimeoutOther<>(null, null);
+			dummy.once = 1;
+			return dummy;
 		}
 
 		@Override
@@ -385,8 +350,7 @@ final class FluxSampleTimeout<T, U> extends InternalFluxOperator<T, T> {
 		@Override
 		public void onNext(U t) {
 			if (ONCE.compareAndSet(this, 0, 1)) {
-				cancel();
-
+				super.cancel();
 				main.otherNext(this);
 			}
 		}
@@ -394,7 +358,7 @@ final class FluxSampleTimeout<T, U> extends InternalFluxOperator<T, T> {
 		@Override
 		public void onError(Throwable t) {
 			if (ONCE.compareAndSet(this, 0, 1)) {
-				main.otherError(index, t);
+				main.otherError(t, this);
 			}
 			else {
 				Operators.onErrorDropped(t, main.currentContext());
@@ -408,8 +372,12 @@ final class FluxSampleTimeout<T, U> extends InternalFluxOperator<T, T> {
 			}
 		}
 
-		final Stream<T> toStream() {
-			return Stream.of(value);
+		@Override
+		public void cancel() {
+			if (ONCE.compareAndSet(this, 0, 1)) {
+				Operators.onDiscard(this.value, main.ctx);
+			}
+			super.cancel();
 		}
 
 	}
