@@ -7646,6 +7646,9 @@ public abstract class Flux<T> implements CorePublisher<T> {
 	 * <img class="marble" src="doc-files/marbles/publishOnForFlux.svg" alt="">
 	 * <p>
 	 * Typically used for fast publisher, slow consumer(s) scenarios.
+  * Note that when using the same {@link Scheduler} to publish multiple fluxes, 
+  * if one flux never empties, the thread will never stop catering for that one input flux, 
+  * and will never request nor publish the other fluxes' elements.
 	 * <blockquote><pre>
 	 * {@code flux.publishOn(Schedulers.single()).subscribe() }
 	 * </pre></blockquote>
